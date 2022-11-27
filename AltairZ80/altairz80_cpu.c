@@ -209,7 +209,7 @@ const char* handlerNameForPort(const int32 port);
 
 UNIT cpu_unit = {
     UDATA (NULL, UNIT_FIX | UNIT_BINK | UNIT_CPU_ALTAIRROM |
-    UNIT_CPU_STOPONHALT | UNIT_CPU_MMU, MAXBANKSIZE)
+    UNIT_CPU_STOPONHALT | UNIT_CPU_MMU | UNIT_CPU_STOPMSG, MAXBANKSIZE)
 };
 
         uint32 PCX              = 0;                /* external view of PC                          */
@@ -517,6 +517,10 @@ static MTAB cpu_mod[] = {
         NULL, "Enable verbose messages"     },
     { UNIT_CPU_VERBOSE,     0,                  "QUIET",        "QUIET",        NULL, NULL,
         NULL, "Disable verbose messages"                },
+    { UNIT_CPU_STOPMSG,     UNIT_CPU_STOPMSG,   "STOPMSG",      "STOPMSG",      NULL, NULL,
+        NULL, "Enable stop messages"  },
+    { UNIT_CPU_STOPMSG,     0,                  "NOSTOPMSG",    "NOSTOPMSG",    NULL, NULL,
+        NULL, "Disable stop messages" },
     { MTAB_VDV,             0,                  NULL,           "CLEARMEMORY",  &cpu_clear_command,
         NULL, NULL, "Clears the RAM"  },
     { UNIT_CPU_MMU,         UNIT_CPU_MMU,       "MMU",          "MMU",          NULL, NULL,
@@ -2081,6 +2085,7 @@ t_stat sim_instr (void) {
         for (i = 0; i < MAXBANKSIZE; i++)
             M[i] = MOPT[i];
     }
+    result |= (cpu_unit.flags & UNIT_CPU_STOPMSG) ? 0 : SCPE_NOMESSAGE;
     return result;
 }
 
