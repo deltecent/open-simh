@@ -25,15 +25,16 @@
 
     These functions support the Morrow Micro-Decision Models 2 and 3.
 
-    There are two devices defined, MMD and MMDM. The MMD device supports 4
-    floppy drives and the console serial port.
+    There are four devices defined, MMD, MMDC, MMDM, and MMDP. Tre MMD device
+    supports 4 floppy drives. The MMDC device supports the console serial port.
+    The MMDM device support the modem port. The MMDP device supports the printer
+    port.
 
     The Micro-Decision's second serial (modem) port uses I/O ports 0xfe and 0xff.
     Z80 or 8080 programs can also communicate with the SIMH pseudo device via
-    port 0xfe. Due to this conflict, the MMDM device is disabled by default. In
-    order to use the modem port, execute "SET MMDM ENABLE". Note that when the
-    MMDM device is enabled it will not be possible to use the SIMH pseudo device
-    and CP/M utilities such as R.COM and W.COM.
+    port 0xfe. In order to use the modem port, execute "SET MMDM ENABLE". Note
+    that when the MMDM device is enabled it will not be possible to use the SIMH
+    pseudo device and CP/M utilities such as R.COM and W.COM.
 
     Units:
 
@@ -41,8 +42,9 @@
     MMD1 - Drive B
     MMD2 - Drive C
     MMD3 - Drive D
-    MMD4 - Console Port
+    MMDC - Console Port
     MMDM - Modem Port
+    MMDP - Printer Port
 
     ** NOTES **
 
@@ -140,6 +142,7 @@ extern uint32 PCX;
 
 extern uint32 sim_map_resource(uint32 baseaddr, uint32 size, uint32 resource_type,
                                int32 (*routine)(const int32, const int32, const int32), const char* name, uint8 unmap);
+extern t_stat set_dev_enbdis(DEVICE *dptr, UNIT *uptr, int32 flag, CONST char *cptr);
 
 /* Debug flags */
 #define VERBOSE_MSG         (1 << 0)
@@ -165,23 +168,30 @@ static DEBTAB mmd_dt[] = {
 /*****************************/
 
 static t_stat mmd_reset(DEVICE *dptr);
-static t_stat mmdm_reset(DEVICE *dptr);
-static t_stat mmd_svc(UNIT *uptr);
-static t_stat mmdm_svc(UNIT *uptr);
+static t_stat mmd_uart_reset(DEVICE *dptr);
+static t_stat mmdp_reset(DEVICE *dptr);
+static t_stat mmd_uart_svc(UNIT *uptr);
 static t_stat mmd_sio1_svc(UNIT *uptr);
 static t_stat mmd_attach(UNIT *uptr, CONST char *cptr);
-static t_stat mmdm_attach(UNIT *uptr, CONST char *cptr);
 static t_stat mmd_detach(UNIT *uptr);
-static t_stat mmdm_detach(UNIT *uptr);
+static t_stat mmd_uart_attach(UNIT *uptr, CONST char *cptr);
+static t_stat mmd_uart_detach(UNIT *uptr);
+static t_stat mmdp_attach(UNIT *uptr, CONST char *cptr);
+static t_stat mmdp_detach(UNIT *uptr);
+static t_stat mmdp_att_help(FILE *st, DEVICE *dptr, UNIT *uptr, int32 flag, const char *cptr);
 static t_stat mmd_config_line(DEVICE *dev, TMLN *tmln, int baud);
 static t_stat mmd_boot(int32 unitno, DEVICE *dptr);
 static const char* mmd_description(DEVICE *dptr);
+static const char* mmdc_description(DEVICE *dptr);
+static const char* mmdm_description(DEVICE *dptr);
+static const char* mmdp_description(DEVICE *dptr);
 static t_stat mmd_set_diag(UNIT *uptr, int32 val, CONST char *cptr, void *desc);
 static t_stat mmd_show_diag(FILE *st, UNIT *uptr, int32 val, CONST void *desc);
 static t_stat mmd_set_rom(UNIT *uptr, int32 val, CONST char *cptr, void *desc);
 static t_stat mmd_show_rom(FILE *st, UNIT *uptr, int32 val, CONST void *desc);
 static t_stat mmd_set_sides(UNIT *uptr, int32 val, CONST char *cptr, void *desc);
 static t_stat mmd_show_sides(FILE *st, UNIT *uptr, int32 val, CONST void *desc);
+static t_stat mmd_show_ports(FILE *st, UNIT *uptr, int32 val, CONST void *desc);
 static int32 mmddev(int32 Addr, int32 rw, int32 data);
 static int32 mmdrom(int32 Addr, int32 rw, int32 data);
 static int32 mmdmem(int32 Addr, int32 rw, int32 data);
@@ -2545,8 +2555,6 @@ static uint8 *mmd_rom = mmd_rom_31;    /* Default 3.1 ROM */
 /*******************/
 
 #define MMD_MAX_DRIVES  4
-#define MMD_UNITS       MMD_MAX_DRIVES + 1
-#define MMD_SIO1_UNIT   MMD_UNITS - 1
 #define MMD_SECTOR_LEN  1024
 #define MMD_SPT         5           /* Sectors per Track */
 #define MMD_BPT         (MMD_SPT * MMD_SECTOR_LEN)
@@ -2556,7 +2564,7 @@ static uint8 *mmd_rom = mmd_rom_31;    /* Default 3.1 ROM */
 #define MMD_DS_CAPACITY (MMD_BPT * MMD_TRACKS * MMD_SIDES)  /* DS Disk Capacity */
 
 #define MMD_IO_BASE     0xf0
-#define MMD_IO_SIZE     14        /* FE is used by SIMH */
+#define MMD_IO_SIZE     12
 
 #define MMD_REG_CH0DIV   0xf0
 #define MMD_REG_CH1DIV   0xf1
@@ -2570,8 +2578,6 @@ static uint8 *mmd_rom = mmd_rom_31;    /* Default 3.1 ROM */
 #define MMD_REG_MOTOR    0xf8
 #define MMD_REG_FDCSTAT  0xfa
 #define MMD_REG_FDCDATA  0xfb
-#define MMD_REG_CDATA    0xfc
-#define MMD_REG_CSTAT    0xfd
 
 #define MMD_CH_1         0x7e    /* Select CTC Channel 1 */
 #define MMD_CH_2         0xbe    /* Select CTC Channel 2 */
@@ -2682,11 +2688,6 @@ typedef struct {
     uint8   stkcnt;                         /* Stack Count */
     uint32  secidx;                         /* Sector index */
     uint32  seccnt;                         /* Sector count */
-    uint8   rxd;                            /* Console rx data register */
-    uint8   txd;                            /* Console tx data register */
-    uint8   txp;                            /* Console tx data pending */
-    uint8   cstatus;                        /* Console status register */
-    uint16  baud;                           /* Console baud rate */
     uint8   intenable;                      /* Interrupt enable */
     uint8   intvec;                         /* Interrupt vector */
     uint8   databus;                        /* Mode 2 interrupt data bus */
@@ -2700,28 +2701,25 @@ typedef struct {
     uint32    rom_size;     /* Memory Address space requirement */
     uint32    io_base;      /* I/O Base Address */
     uint32    io_size;      /* I/O Address Space requirement */
-    int32     conn[2];      /* Connected Status */
     uint8     diagEnabled;  /* DIAG is enabled */
     uint8     romEnabled;   /* ROM is enabled */
-    uint32    sio1ticks;    /* SIO Timer ticks */
     uint8     drive;        /* Currently selected drive */
     MMD_REG   MMD;          /* MMD Registers and Data */
-    UNIT *uptr[MMD_UNITS];
+    UNIT *uptr[MMD_MAX_DRIVES];
 } MMD_CTX;
 
 static MMD_CTX mmd_ctx_data = {
     MMD_ROM_BASE, MMD_ROM_SIZE, MMD_IO_BASE, MMD_IO_SIZE,
-    {0,0}, FALSE, TRUE, 6, 10
+    FALSE, TRUE
 };
 
 static MMD_CTX *mmd_ctx = &mmd_ctx_data;
 
-static UNIT mmd_unit[MMD_UNITS] = {
-    { UDATA (mmd_svc, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, 0), 10000 },
-    { UDATA (mmd_svc, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, 0), 10000 },
-    { UDATA (mmd_svc, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, 0), 10000 },
-    { UDATA (mmd_svc, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, 0), 10000 },
-    { UDATA (mmd_sio1_svc, UNIT_ATTABLE + UNIT_DISABLE, 0), 10000 },
+static UNIT mmd_unit[MMD_MAX_DRIVES] = {
+    { UDATA (NULL, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, 0), 10000 },
+    { UDATA (NULL, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, 0), 10000 },
+    { UDATA (NULL, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, 0), 10000 },
+    { UDATA (NULL, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, 0), 10000 }
 };
 
 static REG mmd_reg[] = {
@@ -2733,10 +2731,6 @@ static REG mmd_reg[] = {
     { DRDATAD (HEAD, mmd_ctx_data.MMD.h, 8, "Head register"), },
     { FLDATAD (ROM, mmd_ctx_data.romEnabled, 0, "ROM enabled bit"), },
     { FLDATAD (DIAG, mmd_ctx_data.diagEnabled, 0, "DIAG enabled bit"), },
-    { HRDATAD (BAUD, mmd_ctx_data.MMD.baud, 16, "Console port baud register"), },
-    { HRDATAD (TXP, mmd_ctx_data.MMD.txp, 8, "Console port TX Pending register"), },
-    { HRDATAD (TXD, mmd_ctx_data.MMD.txd, 8, "Console port TX register"), },
-    { HRDATAD (RXD, mmd_ctx_data.MMD.rxd, 8, "Console port RX register"), },
     { FLDATAD (INTENA, mmd_ctx_data.MMD.intenable, 1, "Interrupt enable"), },
     { DRDATAD (INTVEC, mmd_ctx_data.MMD.intvec, 8, "Interrupt vector (0-7)"), },
     { DRDATAD (DATABUS, mmd_ctx_data.MMD.databus, 8, "Mode 2 Interrupt Data Bus"), },
@@ -2750,6 +2744,8 @@ static MTAB mmd_mod[] = {
         &mmd_set_rom, &mmd_show_rom, NULL, "Set/Show ROM version"},
     { MTAB_XTD|MTAB_VUN|MTAB_VALR, 0, "SIDES", "SIDES={1|2}",
         &mmd_set_sides, &mmd_show_sides, NULL, "Set/Show disk sides"},
+    { MTAB_XTD|MTAB_VDV,    0,                  "PORT",     "PORT",
+        NULL, mmd_show_ports, NULL, "Show I/O ports" },
     { 0 }
 };
 
@@ -2758,7 +2754,7 @@ DEVICE mmd_dev = {
     mmd_unit,                             /* unit */
     mmd_reg,                              /* registers */
     mmd_mod,                              /* modifiers */
-    MMD_UNITS,                            /* # units */
+    MMD_MAX_DRIVES,                       /* # units */
     10,                                   /* address radix */
     31,                                   /* address width */
     1,                                    /* addr increment */
@@ -2786,23 +2782,9 @@ DEVICE mmd_dev = {
 /* UART */
 /********/
 
-static TMLN mmd_tmln[1] = { /* line descriptors */
-    { 0 }
-};
-
-static TMXR mmd_tmxr = {    /* multiplexer descriptor */
-    1,                      /* number of terminal lines */
-    0,                      /* listening port (reserved) */
-    0,                      /* master socket  (reserved) */
-    mmd_tmln,               /* line descriptor array */
-    NULL,                   /* line connection order */
-    NULL                    /* multiplexer device (derived internally) */
-};
-
 typedef struct {
     PNP_INFO  pnp;          /* Must be first */
     int32     conn;         /* Connected Status */
-    uint32    ticks;        /* SIO Timer ticks */
     uint16    baud;         /* Baud rate */
     uint8     rxd;          /* Receive Buffer */
     uint8     txd;          /* Transmit Buffer */
@@ -2812,18 +2794,8 @@ typedef struct {
     TMXR     *tmxr;         /* TMXR pointer */
 } MMD_UART_CTX;
 
-#define MMD_STAT_TXRDY   0x01
-#define MMD_STAT_RXRDY   0x02
-
-/*********************/
-/* MMDM Modem Device */
-/*********************/
-
-#define MMDM_NAME  "Morrow Micro Decision Modem Port"
-#define MMDM_SNAME "MMDM"
-
-#define MMD_REG_MDATA   0xfe
-#define MMD_REG_MSTAT   0xff
+#define MMD_UART_TXRDY   0x01
+#define MMD_UART_RXRDY   0x02
 
 #define MMD_BAUD_110    1136
 #define MMD_BAUD_300     417
@@ -2832,6 +2804,94 @@ typedef struct {
 #define MMD_BAUD_2400     52
 #define MMD_BAUD_4800     26
 #define MMD_BAUD_9600     13
+
+/***********************/
+/* MMDC Console Device */
+/***********************/
+
+#define MMDC_NAME  "Morrow Micro Decision Console Port"
+#define MMDC_SNAME "MMDC"
+
+#define MMDC_REG_DATA    0xfc
+#define MMDC_REG_STAT    0xfd
+
+static TMLN mmdc_tmln[1] = { /* line descriptors */
+    { 0 }
+};
+
+static TMXR mmdc_tmxr = {    /* multiplexer descriptor */
+    1,                      /* number of terminal lines */
+    0,                      /* listening port (reserved) */
+    0,                      /* master socket  (reserved) */
+    mmdc_tmln,              /* line descriptor array */
+    NULL,                   /* line connection order */
+    NULL                    /* multiplexer device (derived internally) */
+};
+
+static MMD_UART_CTX mmdc_ctx_data = {
+    {0, 0, MMDC_REG_DATA, 2}, 0, 9600,
+    0, 0, 0, 0, mmdc_tmln, &mmdc_tmxr
+};
+
+static MMD_UART_CTX *mmdc_ctx = &mmdc_ctx_data;
+
+static REG mmdc_reg[] = {
+    { HRDATAD (BAUD, mmdc_ctx_data.baud, 16, "Modem port baud register"), },
+    { HRDATAD (STAT, mmdc_ctx_data.status, 8, "Modem port status register"), },
+    { HRDATAD (TXP, mmdc_ctx_data.txp, 8, "Modem port TX pending register"), },
+    { HRDATAD (TXD, mmdc_ctx_data.txd, 8, "Modem port TX data register"), },
+    { HRDATAD (RXD, mmdc_ctx_data.rxd, 8, "Modem port RX register"), },
+    { NULL }
+};
+
+static UNIT mmdc_unit[] = {
+    { UDATA (NULL, UNIT_ATTABLE + UNIT_DISABLE, 0), 10000 }
+};
+
+static MTAB mmdc_mod[] = {
+    { MTAB_XTD|MTAB_VDV,    0,                  "PORT",     "PORT",
+        NULL, mmd_show_ports, NULL, "Show serial I/O ports" },
+    { 0 }
+};
+
+DEVICE mmdc_dev = {
+    MMDC_SNAME,                                     /* name */
+    mmdc_unit,                                      /* unit */
+    mmdc_reg,                                       /* registers */
+    mmdc_mod,                                       /* modifiers */
+    1,                                              /* # units */
+    10,                                             /* address radix */
+    31,                                             /* address width */
+    1,                                              /* addr increment */
+    8,                                              /* data radix */
+    8,                                              /* data width */
+    NULL,                                           /* examine routine */
+    NULL,                                           /* deposit routine */
+    &mmd_uart_reset,                                /* reset routine */
+    NULL,                                           /* boot routine */
+    &mmd_uart_attach,                               /* attach routine */
+    &mmd_uart_detach,                               /* detach routine */
+    &mmdc_ctx_data,                                 /* context */
+    (DEV_DISABLE | DEV_DIS | DEV_DEBUG | DEV_MUX),  /* flags */
+    ERROR_MSG,                                      /* debug control */
+    mmd_dt,                                         /* debug flags */
+    NULL,                                           /* mem size routine */
+    NULL,                                           /* logical name */
+    NULL,                                           /* help */
+    NULL,                                           /* attach help */
+    NULL,                                           /* context for help */
+    &mmdc_description                               /* description */
+};
+
+/*********************/
+/* MMDM Modem Device */
+/*********************/
+
+#define MMDM_NAME  "Morrow Micro Decision Modem Port"
+#define MMDM_SNAME "MMDM"
+
+#define MMDM_REG_DATA   0xfe    /* 0xFE is used by SIMH pseudo device */
+#define MMDM_REG_STAT   0xff
 
 static TMLN mmdm_tmln[1] = { /* line descriptors */
     { 0 }
@@ -2847,7 +2907,7 @@ static TMXR mmdm_tmxr = {    /* multiplexer descriptor */
 };
 
 static MMD_UART_CTX mmdm_ctx_data = {
-    {0, 0, MMD_REG_MDATA, 2}, 0, 0, 9600,
+    {0, 0, MMDM_REG_DATA, 2}, 0, 9600,
     0, 0, 0, 0, mmdm_tmln, &mmdm_tmxr
 };
 
@@ -2859,15 +2919,16 @@ static REG mmdm_reg[] = {
     { HRDATAD (TXP, mmdm_ctx_data.txp, 8, "Modem port TX pending register"), },
     { HRDATAD (TXD, mmdm_ctx_data.txd, 8, "Modem port TX data register"), },
     { HRDATAD (RXD, mmdm_ctx_data.rxd, 8, "Modem port RX register"), },
-    { DRDATAD (TICKS, mmdm_ctx_data.ticks, 32, "Modem timer ticks"), },
     { NULL }
 };
 
 static UNIT mmdm_unit[] = {
-    { UDATA (mmdm_svc, UNIT_ATTABLE + UNIT_DISABLE, 0), 10000 }
+    { UDATA (NULL, UNIT_ATTABLE + UNIT_DISABLE, 0), 10000 }
 };
 
 static MTAB mmdm_mod[] = {
+    { MTAB_XTD|MTAB_VDV,    0,                  "PORT",     "PORT",
+        NULL, mmd_show_ports, NULL, "Show serial I/O ports" },
     { 0 }
 };
 
@@ -2884,10 +2945,10 @@ DEVICE mmdm_dev = {
     8,                                              /* data width */
     NULL,                                           /* examine routine */
     NULL,                                           /* deposit routine */
-    &mmdm_reset,                                    /* reset routine */
+    &mmd_uart_reset,                                /* reset routine */
     NULL,                                           /* boot routine */
-    &mmdm_attach,                                   /* attach routine */
-    &mmdm_detach,                                   /* detach routine */
+    &mmd_uart_attach,                                   /* attach routine */
+    &mmd_uart_detach,                                   /* detach routine */
     &mmdm_ctx_data,                                 /* context */
     (DEV_DISABLE | DEV_DIS | DEV_DEBUG | DEV_MUX),  /* flags */
     ERROR_MSG,                                      /* debug control */
@@ -2897,22 +2958,114 @@ DEVICE mmdm_dev = {
     NULL,                                           /* help */
     NULL,                                           /* attach help */
     NULL,                                           /* context for help */
-    &mmd_description                                /* description */
+    &mmdm_description                               /* description */
+};
+
+/***********************/
+/* MMDP Printer Device */
+/***********************/
+
+#define MMDP_NAME  "Morrow Micro Decision Printer Port"
+#define MMDP_SNAME "MMDP"
+
+static TMLN mmdp_tmln[1] = { /* line descriptors */
+    { 0 }
+};
+
+static TMXR mmdp_tmxr = {    /* multiplexer descriptor */
+    1,                       /* number of terminal lines */
+    0,                       /* listening port (reserved) */
+    0,                       /* master socket  (reserved) */
+    mmdp_tmln,               /* line descriptor array */
+    NULL,                    /* line connection order */
+    NULL                     /* multiplexer device (derived internally) */
+};
+
+typedef struct {
+    PNP_INFO  pnp;          /* Must be first */
+    int32     conn;         /* Connected Status */
+    uint8     txd;          /* Transmit Buffer */
+    uint8     txp;          /* Transmit Pending */
+    uint8     status;       /* Status Buffer */
+    TMLN     *tmln;         /* TMLN pointer */
+    TMXR     *tmxr;         /* TMXR pointer */
+} MMD_CEN_CTX;
+
+static MMD_CEN_CTX mmdp_ctx_data = {
+    {0, 0, 0, 0}, 0, 0, 0, 0, mmdp_tmln, &mmdp_tmxr
+};
+
+static MMD_CEN_CTX *mmdp_ctx = &mmdp_ctx_data;
+
+static REG mmdp_reg[] = {
+    { HRDATAD (STAT, mmdm_ctx_data.status, 8, "Printer port status register"), },
+    { HRDATAD (TXP, mmdp_ctx_data.txp, 8, "Printer port busy register"), },
+    { HRDATAD (TXD, mmdp_ctx_data.txd, 8, "Printer port data register"), },
+    { NULL }
+};
+
+static UNIT mmdp_unit[] = {
+    { UDATA (NULL, UNIT_ATTABLE + UNIT_DISABLE + UNIT_SEQ, 0), 0 }
+};
+
+static MTAB mmdp_mod[] = {
+    { 0 }
+};
+
+DEVICE mmdp_dev = {
+    MMDP_SNAME,                                     /* name */
+    mmdp_unit,                                      /* unit */
+    mmdp_reg,                                       /* registers */
+    mmdp_mod,                                       /* modifiers */
+    1,                                              /* # units */
+    10,                                             /* address radix */
+    31,                                             /* address width */
+    1,                                              /* addr increment */
+    8,                                              /* data radix */
+    8,                                              /* data width */
+    NULL,                                           /* examine routine */
+    NULL,                                           /* deposit routine */
+    &mmdp_reset,                                    /* reset routine */
+    NULL,                                           /* boot routine */
+    &mmdp_attach,                                   /* attach routine */
+    &mmdp_detach,                                   /* detach routine */
+    &mmdp_ctx_data,                                 /* context */
+    (DEV_DISABLE | DEV_DIS | DEV_DEBUG | DEV_MUX),  /* flags */
+    ERROR_MSG,                                      /* debug control */
+    mmd_dt,                                         /* debug flags */
+    NULL,                                           /* mem size routine */
+    NULL,                                           /* logical name */
+    NULL,                                           /* help */
+    &mmdp_att_help,                                 /* attach help */
+    NULL,                                           /* context for help */
+    &mmdp_description                               /* description */
 };
 
 /*************/
 /* Functions */
 /*************/
 
-
 static const char* mmd_description(DEVICE *dptr) {
     return MMD_NAME;
+}
+
+static const char* mmdc_description(DEVICE *dptr) {
+    return MMDC_NAME;
+}
+
+static const char* mmdm_description(DEVICE *dptr) {
+    return MMDM_NAME;
+}
+
+static const char* mmdp_description(DEVICE *dptr) {
+    return MMDP_NAME;
 }
 
 /* Reset routines */
 static t_stat mmd_reset(DEVICE *dptr)
 {
     uint8 i;
+    uint8 first = 1;
 
     if (dptr->flags & DEV_DIS) { /* Disconnect I/O Ports */
         sim_map_resource(mmd_ctx->rom_base, mmd_ctx->rom_size, RESOURCE_TYPE_MEMORY, &mmdrom, "mmdrom", TRUE);
@@ -2928,8 +3081,15 @@ static t_stat mmd_reset(DEVICE *dptr)
             return SCPE_ARG;
         }
 
-        /* Start timers for console unit */
-        sim_activate_after(mmd_ctx->uptr[MMD_SIO1_UNIT], 500);  /* activate 500 us timer */
+        /*
+        * If this is the first reset of the MMD device,
+        * enable the MMDC console device
+        */
+	if (first--) {
+            set_dev_enbdis (&mmdc_dev, NULL, 1, NULL);
+            set_dev_enbdis (&mmdm_dev, NULL, 1, NULL);
+            set_dev_enbdis (&mmdp_dev, NULL, 1, NULL);
+        }
     }
 
     mmd_ctx->drive = 0;
@@ -2941,20 +3101,17 @@ static t_stat mmd_reset(DEVICE *dptr)
     mmd_ctx->MMD.cmd = 0;
     mmd_ctx->MMD.sto = 1;
     mmd_ctx->MMD.pcn = 2;
-    mmd_ctx->MMD.cstatus = MMD_STAT_TXRDY;
     mmd_ctx->MMD.intenable = TRUE;
     mmd_ctx->MMD.intvec = 0;
     mmd_ctx->MMD.databus = 0x7f;
     mmd_ctx->MMD.tc = FALSE;
 
-    for (i=0; i < MMD_UNITS; i++) {
+    /* Reset Registers */
+    for (i=0; i < MMD_MAX_DRIVES; i++) {
         if (mmd_ctx->uptr[i] == NULL) {
             mmd_ctx->uptr[i] = &mmd_dev.units[i];
         }
-    }
 
-    /* Reset Registers */
-    for (i=0; i < MMD_MAX_DRIVES; i++) {
         mmd_ctx->MMD.motor[i] |= MMD_STAT_DIAG;
         if (mmd_ctx->diagEnabled) {
             mmd_ctx->MMD.motor[i] &= ~MMD_STAT_DIAG;
@@ -2981,157 +3138,149 @@ static t_stat mmd_reset(DEVICE *dptr)
     return SCPE_OK;
 }
 
-static t_stat mmdm_reset(DEVICE *dptr) {
-    MMD_UART_CTX *xptr;
+static t_stat mmd_uart_reset(DEVICE *dptr) {
+    MMD_UART_CTX *uart;
 
-    xptr = (MMD_UART_CTX *) dptr->ctxt;
+    uart = (MMD_UART_CTX *) dptr->ctxt;
 
     dptr->units[0].dptr = dptr;
 
     if (dptr->flags & DEV_DIS) { /* Disconnect Modem I/O Ports */
-        sim_map_resource(xptr->pnp.io_base, xptr->pnp.io_size, RESOURCE_TYPE_IO, &mmddev, "mmdmdev", TRUE);
+        sim_map_resource(uart->pnp.io_base, uart->pnp.io_size, RESOURCE_TYPE_IO, &mmddev, dptr->name, TRUE);
 
         mmdm_ctx->status = 0;
     } else {
         /* Connect I/O Ports at base address */
-        if (sim_map_resource(xptr->pnp.io_base, xptr->pnp.io_size, RESOURCE_TYPE_IO, &mmddev, "mmdmdev", FALSE) != 0) {
-            sim_debug(ERROR_MSG, &mmd_dev, "Error mapping I/O resource at 0x%02x\n", xptr->pnp.io_base);
+        if (sim_map_resource(uart->pnp.io_base, uart->pnp.io_size, RESOURCE_TYPE_IO, &mmddev, dptr->name, FALSE) != 0) {
+            sim_debug(ERROR_MSG, dptr, "Error mapping I/O resource at 0x%02x\n", uart->pnp.io_base);
             return SCPE_ARG;
         }
 
-        mmdm_ctx->status = MMD_STAT_TXRDY;
+        uart->status = MMD_UART_TXRDY;
+    }
 
-        /* Start timer */
-        sim_activate_after(dptr->units, 500);  /* reactivate 500us timer */
+    return SCPE_OK;
+}
+
+static t_stat mmdp_reset(DEVICE *dptr) {
+    MMD_CEN_CTX *xptr;
+
+    xptr = (MMD_CEN_CTX *) dptr->ctxt;
+
+    dptr->units[0].dptr = dptr;
+
+    if (dptr->flags & DEV_DIS) { /* Disconnect Printer Port */
+        mmdp_ctx->status |= MMD_STAT_BUSY;
+
+        /* Cancel timer */
+        sim_cancel(dptr->units);
+    } else {
+        mmdp_ctx->status = 0;
     }
 
     return SCPE_OK;
 }
 
 /* Service routines */
-static t_stat mmd_svc(UNIT *uptr)
+static t_stat mmd_uart_svc(UNIT *uptr)
 {
-    mmd_ctx->MMD.status &= ~MMD_STAT_BUSY;
-
-    sim_activate_after(uptr, 4000);  /* reactivate 4ms timer */
-
-    return SCPE_OK;
-}
-
-static t_stat mmdm_svc(UNIT *uptr)
-{
+    MMD_UART_CTX *uart;
     int32 c;
     t_stat r;
 
-    mmdm_ctx->ticks++;
+    uart = (MMD_UART_CTX *) uptr->dptr->ctxt;
 
     /* Check for new incoming connection */
     if (uptr->flags & UNIT_ATT) {
-        if (tmxr_poll_conn(&mmdm_tmxr) >= 0) {      /* poll connection */
+        if (tmxr_poll_conn(uart->tmxr) >= 0) {      /* poll connection */
 
-            mmdm_ctx->conn = 1;          /* set connected   */
-
-            sim_debug(STATUS_MSG, uptr->dptr, "new modem connection.\n");
-        }
-
-        /* Modem TX byte pending? */
-        if (mmdm_ctx->txp) {
-            r = tmxr_putc_ln(&mmdm_tmln[0], mmdm_ctx->txd);
-
-            mmdm_ctx->txp = FALSE;
-
-            if (r == SCPE_LOST) {
-                mmdm_ctx->conn = 0;          /* Connection was lost */
-                sim_debug(STATUS_MSG, uptr->dptr, "modem lost connection.\n");
-            }
-        }
-
-        /* Update TX Ready */
-        if (!(mmdm_ctx->status & MMD_STAT_TXRDY)) {
-            tmxr_poll_tx(&mmdm_tmxr);
-            mmdm_ctx->status |= (tmxr_txdone_ln(&mmdm_tmln[0]) && mmdm_ctx->conn) ? MMD_STAT_TXRDY : 0;
-        }
-
-        /* Check for Data if modem RX buffer empty */
-        if (!(mmdm_ctx->status & MMD_STAT_RXRDY)) {
-            tmxr_poll_rx(&mmdm_tmxr);
-
-            c = tmxr_getc_ln(&mmdm_tmln[0]);
-
-            if (c & (TMXR_VALID | SCPE_KFLAG)) {
-                mmdm_ctx->rxd = c & 0xff;
-                mmdm_ctx->status |= MMD_STAT_RXRDY;
-            }
-        }
-
-        /* Restart timer */
-        sim_activate_after(uptr, 500);  /* reactivate 500 us timer */
-    }
-
-    return SCPE_OK;
-}
-
-static t_stat mmd_sio1_svc(UNIT *uptr)
-{
-    int32 c;
-    t_stat r;
-
-    mmd_ctx->sio1ticks++;
-
-    /* Check for new incoming connection */
-    if (uptr->flags & UNIT_ATT) {
-        if (tmxr_poll_conn(&mmd_tmxr) >= 0) {      /* poll connection */
-
-            mmd_ctx->conn[0] = 1;          /* set connected   */
+            uart->conn = 1;          /* set connected   */
 
             sim_debug(STATUS_MSG, uptr->dptr, "new connection.\n");
         }
     }
 
-    /* Serial 1 TX byte pending? */
-    if (mmd_ctx->MMD.txp) {
+    /* TX byte pending? */
+    if (uart->txp) {
         if (uptr->flags & UNIT_ATT) {
-            r = tmxr_putc_ln(&mmd_tmln[0], mmd_ctx->MMD.txd);
+            r = tmxr_putc_ln(&uart->tmln[0], uart->txd);
         } else {
-            r = sim_putchar(mmd_ctx->MMD.txd);
+            r = sim_putchar(uart->txd);
         }
 
-        mmd_ctx->MMD.txp = FALSE;
+        uart->txp = FALSE;
 
         if (r == SCPE_LOST) {
-            mmd_ctx->conn[0] = 0;          /* Connection was lost */
+            uart->conn = 0;          /* Connection was lost */
             sim_debug(STATUS_MSG, uptr->dptr, "lost connection.\n");
         }
     }
 
     /* Update TX Ready */
-    if (!(mmd_ctx->MMD.cstatus & MMD_STAT_TXRDY)) {
+    if (!(uart->status & MMD_UART_TXRDY)) {
         if (uptr->flags & UNIT_ATT) {
-            tmxr_poll_tx(&mmd_tmxr);
-            mmd_ctx->MMD.cstatus |= (tmxr_txdone_ln(&mmd_tmln[0]) && mmd_ctx->conn[0]) ? MMD_STAT_TXRDY : 0;
+            tmxr_poll_tx(uart->tmxr);
+            uart->status |= (tmxr_txdone_ln(&uart->tmln[0]) && uart->conn) ? MMD_UART_TXRDY : 0;
         } else {
-            mmd_ctx->MMD.cstatus |= MMD_STAT_TXRDY;
+            uart->status |= MMD_UART_TXRDY;
         }
     }
 
-    /* Check for Data if Serial 1 RX buffer empty */
-    if (!(mmd_ctx->MMD.cstatus & MMD_STAT_RXRDY)) {
+    /* Check for Data if RX buffer empty */
+    if (!(uart->status & MMD_UART_RXRDY)) {
         if (uptr->flags & UNIT_ATT) {
-            tmxr_poll_rx(&mmd_tmxr);
+            tmxr_poll_rx(uart->tmxr);
 
-            c = tmxr_getc_ln(&mmd_tmln[0]);
+            c = tmxr_getc_ln(&uart->tmln[0]);
         } else {
             c = sim_poll_kbd();
         }
 
         if (c & (TMXR_VALID | SCPE_KFLAG)) {
-            mmd_ctx->MMD.rxd = c & 0xff;
-            mmd_ctx->MMD.cstatus |= MMD_STAT_RXRDY;
+            uart->rxd = c & 0xff;
+            uart->status |= MMD_UART_RXRDY;
         }
     }
 
-    /* Restart timer */
-    sim_activate_after(uptr, 500);  /* reactivate 500 us timer */
+    return SCPE_OK;
+}
+
+static t_stat mmdp_svc(UNIT *uptr)
+{
+    int32 c;
+    t_stat r;
+
+    /* Check for new incoming connection */
+    if (uptr->flags & UNIT_ATT) {
+        if (tmxr_poll_conn(&mmdp_tmxr) >= 0) {      /* poll connection */
+
+            mmdp_ctx->conn = 1;          /* set connected   */
+
+            sim_debug(STATUS_MSG, uptr->dptr, "new printer connection.\n");
+        }
+    }
+
+    /* Printer TX byte pending? */
+    if (mmdp_ctx->txp) {
+        if (uptr->flags & UNIT_ATT) {
+            if (uptr->u3 & SWMASK('F')) {
+                r = (sim_fwrite(&mmdp_ctx->txd, 1, 1, mmdp_unit[0].fileref) == 1) ? SCPE_OK : SCPE_IOERR;
+            }
+            else {
+                r = tmxr_putc_ln(&mmdp_tmln[0], mmdp_ctx->txd);
+            }
+        } else {
+            r = sim_putchar(mmdp_ctx->txd);
+        }
+
+        mmdp_ctx->txp = FALSE;
+        mmdp_ctx->status &= ~MMD_STAT_BUSY;
+
+        if (r == SCPE_LOST) {
+            mmdp_ctx->conn = 0;          /* Connection was lost */
+            sim_debug(STATUS_MSG, uptr->dptr, "modem lost connection.\n");
+        }
+    }
 
     return SCPE_OK;
 }
@@ -3141,17 +3290,6 @@ static t_stat mmd_attach(UNIT *uptr, CONST char *cptr)
 {
     t_stat r;
     unsigned int i = 0;
-
-    /* Attaching to console interface? */
-    if (uptr == &mmd_dev.units[MMD_SIO1_UNIT]) {
-        if ((r = tmxr_attach(&mmd_tmxr, uptr, cptr)) == SCPE_OK) {
-            mmd_tmln[0].rcve = 1;
-
-            sim_debug(VERBOSE_MSG, uptr->dptr, "attached '%s' to console interface.\n", cptr);
-        }
-
-        return r;
-    }
 
     r = attach_unit(uptr, cptr);    /* attach unit  */
     if (r != SCPE_OK) {             /* error?       */
@@ -3200,12 +3338,15 @@ static t_stat mmd_attach(UNIT *uptr, CONST char *cptr)
     return SCPE_OK;
 }
 
-static t_stat mmdm_attach(UNIT *uptr, CONST char *cptr)
+static t_stat mmd_uart_attach(UNIT *uptr, CONST char *cptr)
 {
+    MMD_UART_CTX *xptr;
     t_stat r;
 
-    if ((r = tmxr_attach(&mmdm_tmxr, uptr, cptr)) == SCPE_OK) {
-        mmdm_tmln[0].rcve = 1;
+    xptr = (MMD_UART_CTX *) uptr->dptr->ctxt;
+
+    if ((r = tmxr_attach(xptr->tmxr, uptr, cptr)) == SCPE_OK) {
+        xptr->tmln[0].rcve = 1;
 
         sim_debug(VERBOSE_MSG, uptr->dptr, "attached '%s' to modem interface.\n", cptr);
     }
@@ -3213,20 +3354,42 @@ static t_stat mmdm_attach(UNIT *uptr, CONST char *cptr)
     return r;
 }
 
+static t_stat mmdp_attach(UNIT *uptr, CONST char *cptr)
+{
+    t_stat r;
+
+    if (sim_switches & SWMASK('F')) {
+        r = attach_unit(uptr, cptr);    /* attach file unit */
+    }
+    else {
+        if ((r = tmxr_attach(&mmdp_tmxr, uptr, cptr)) == SCPE_OK) {
+            mmdp_tmln[0].rcve = 1;
+        }
+    }
+
+    if (r == SCPE_OK) {
+        uptr->u3 = sim_switches;
+
+        sim_debug(VERBOSE_MSG, uptr->dptr, "attached '%s' to printer interface.\n", cptr);
+    }
+
+    return r;
+}
+
+static t_stat mmdp_att_help (FILE *st, DEVICE *dptr, UNIT *uptr, int32 flag, const char *cptr)
+{
+    fprintf(st, "%s File Attach Help\n\n", dptr->name);
+    fprintf(st, "To send %s output to a file, use the -F switch.\n\n", dptr->name);
+    fprintf(st, "sim> ATTACH %s -f <output filename>\n\n", dptr->name);
+
+    return tmxr_attach_help(st, dptr, uptr, flag, cptr);
+}
+
 /* Detach routines */
 static t_stat mmd_detach(UNIT *uptr)
 {
     t_stat r;
     int8 i;
-
-    /* detaching console interface? */
-    if (uptr == &mmd_dev.units[MMD_SIO1_UNIT]) {
-        if ((r = tmxr_detach(&mmd_tmxr, uptr)) == SCPE_OK) {
-            sim_debug(VERBOSE_MSG, uptr->dptr, "detached from console interface.\n");
-        }
-
-        return r;
-    }
 
     for (i = 0; i < MMD_MAX_DRIVES; i++) {
         if (mmd_dev.units[i].fileref == uptr->fileref) {
@@ -3252,15 +3415,45 @@ static t_stat mmd_detach(UNIT *uptr)
     return SCPE_OK;
 }
 
-static t_stat mmdm_detach(UNIT *uptr)
+static t_stat mmd_uart_detach(UNIT *uptr)
 {
+    MMD_UART_CTX *xptr;
     t_stat r;
 
-    if ((r = tmxr_detach(&mmdm_tmxr, uptr)) == SCPE_OK) {
+    xptr = (MMD_UART_CTX *) uptr->dptr->ctxt;
+
+    if ((r = tmxr_detach(xptr->tmxr, uptr)) == SCPE_OK) {
         sim_debug(VERBOSE_MSG, uptr->dptr, "detached from modem interface.\n");
     }
 
     return r;
+}
+
+static t_stat mmdp_detach(UNIT *uptr)
+{
+    t_stat r;
+
+    if (uptr->u3 & SWMASK('F')) {
+        r = detach_unit(uptr);
+    }
+    else {
+        r = tmxr_detach(&mmdp_tmxr, uptr);
+    }
+
+    if (r == SCPE_OK) {
+        sim_debug(VERBOSE_MSG, uptr->dptr, "detached from printer interface.\n");
+    }
+
+    return r;
+}
+
+static t_stat mmd_show_ports(FILE *st, UNIT *uptr, int32 val, CONST void *desc) {
+    MMD_UART_CTX *uart;
+
+    uart = (MMD_UART_CTX *) uptr->dptr->ctxt;
+
+    fprintf(st, "I/O=0x%02X-0x%02X", uart->pnp.io_base, uart->pnp.io_base + uart->pnp.io_size - 1);
+    return SCPE_OK;
 }
 
 static t_stat mmd_config_line(DEVICE *dev, TMLN *tmln, int baud)
@@ -3414,6 +3607,10 @@ static t_stat mmd_set_sides(UNIT *uptr, int32 val, CONST char *cptr, void *desc)
     if (!cptr) return SCPE_IERR;
     if (!strlen(cptr)) return SCPE_ARG;
 
+    if (!(uptr->flags & UNIT_ATT)) {
+        return SCPE_UNATT;
+    }
+
     for (i=0; i < MMD_MAX_DRIVES; i++) {
         if (mmd_ctx->uptr[i] == uptr) {
             break;
@@ -3512,22 +3709,26 @@ static uint8 MMD_Dev_Read(uint32 Addr)
             mmd_ctx->romEnabled = FALSE;
             break;
 
-        case MMD_REG_CSTAT:
-            cData = mmd_ctx->MMD.cstatus;
+        case MMDC_REG_STAT:
+            mmd_uart_svc(mmdc_unit);
+            cData = mmdc_ctx->status;
             break;
 
-        case MMD_REG_MSTAT:
+        case MMDM_REG_STAT:
+            mmd_uart_svc(mmdm_unit);
             cData = mmdm_ctx->status;
             break;
 
-        case MMD_REG_CDATA:
-            cData = mmd_ctx->MMD.rxd;
-            mmd_ctx->MMD.cstatus &= ~MMD_STAT_RXRDY;   /* Clear RX Ready Flag */
+        case MMDC_REG_DATA:
+            mmd_uart_svc(mmdc_unit);
+            cData = mmdc_ctx->rxd;
+            mmdc_ctx->status &= ~MMD_UART_RXRDY;   /* Clear RX Ready Flag */
             break;
 
-        case MMD_REG_MDATA:
+        case MMDM_REG_DATA:
+            mmd_uart_svc(mmdm_unit);
             cData = mmdm_ctx->rxd;
-            mmdm_ctx->status &= ~MMD_STAT_RXRDY;   /* Clear RX Ready Flag */
+            mmdm_ctx->status &= ~MMD_UART_RXRDY;   /* Clear RX Ready Flag */
             break;
 
         case MMD_REG_FDCSTAT:
@@ -3538,13 +3739,16 @@ static uint8 MMD_Dev_Read(uint32 Addr)
             cData = MMD_FDC_Read_Data();
             break;
 
-        case MMD_REG_MTRCHK:
+        case MMD_REG_MTRCHK:   /* Motor Check Rev 1, Centronics Status Rev 2 */
             /* Toggle index if drive mounted to simulate rotation */
             if (mmd_ctx->MMD.stat3[mmd_ctx->drive] & MMD_STAT3_RY) {
                 mmd_ctx->MMD.motor[mmd_ctx->drive] ^= MMD_STAT_IDX;
             }
 
-            cData = mmd_ctx->MMD.motor[mmd_ctx->drive];
+            cData = mmd_ctx->MMD.motor[mmd_ctx->drive] & ~MMD_STAT_BUSY; /* Exclude Rev 2 Printer Status */
+
+            mmdp_svc(mmdp_unit);
+            cData |= mmdp_ctx->status;    /* Printer status */
             break;
 
         case MMD_REG_MOTOR:
@@ -3587,7 +3791,7 @@ static uint8 MMD_Dev_Write(uint32 Addr, int32 Data)
     switch(Addr & 0xff) {
         case MMD_REG_CTCSEL:
             if (Data==MMD_CH_1) {
-                mmd_ctx->MMD.baud = 0;
+                mmdc_ctx->baud = 0;
             }
             else if (Data==MMD_CH_2) {
                 mmdm_ctx->baud = 0;
@@ -3598,8 +3802,8 @@ static uint8 MMD_Dev_Write(uint32 Addr, int32 Data)
             break;
 
         case MMD_REG_CH1DIV:
-            mmd_ctx->MMD.baud = (mmd_ctx->MMD.baud >> 8) | (Data << 8);
-            mmd_config_line(&mmd_dev, &mmd_tmln[0], mmd_ctx->MMD.baud);
+            mmdc_ctx->baud = (mmdc_ctx->baud >> 8) | (Data << 8);
+            mmd_config_line(&mmdc_dev, &mmdc_tmln[0], mmdc_ctx->baud);
             break;
 
         case MMD_REG_CH2DIV:
@@ -3608,22 +3812,28 @@ static uint8 MMD_Dev_Write(uint32 Addr, int32 Data)
             break;
 
         case MMD_REG_CENDATA:
+            mmdp_ctx->txd = Data;
+            mmdp_ctx->txp = TRUE;                /* Set TX pending flag */
+            mmdp_ctx->status |= MMD_STAT_BUSY;    /* Set Printer busy flag */
+            mmdp_svc(mmdp_unit);
             break;
 
         case MMD_REG_ROMCTL:
             mmd_ctx->romEnabled = TRUE;
             break;
 
-        case MMD_REG_CDATA:
-            mmd_ctx->MMD.txd = Data;
-            mmd_ctx->MMD.txp = TRUE;    /* Set TX pending flag */
-            mmd_ctx->MMD.cstatus &= ~MMD_STAT_TXRDY;
+        case MMDC_REG_DATA:
+            mmdc_ctx->txd = Data;
+            mmdc_ctx->txp = TRUE;    /* Set TX pending flag */
+            mmdc_ctx->status &= ~MMD_UART_TXRDY;
+            mmd_uart_svc(mmdc_unit);
             break;
 
-        case MMD_REG_MDATA:
+        case MMDM_REG_DATA:
             mmdm_ctx->txd = Data;
             mmdm_ctx->txp = TRUE;    /* Set TX pending flag */
-            mmdm_ctx->status &= ~MMD_STAT_TXRDY;
+            mmdm_ctx->status &= ~MMD_UART_TXRDY;
+            mmd_uart_svc(mmdm_unit);
             break;
 
         case MMD_REG_VFO:

@@ -76,7 +76,9 @@ extern DEVICE m2sio1_dev;
 extern DEVICE pmmi_dev;
 extern DEVICE hayes_dev;
 extern DEVICE mmd_dev;
+extern DEVICE mmdc_dev;
 extern DEVICE mmdm_dev;
+extern DEVICE mmdp_dev;
 
 extern DEVICE cromfdc_dev;
 extern DEVICE wd179x_dev;
@@ -140,7 +142,9 @@ DEVICE      *sim_devices[]  = {
     &dj2d_dev,
     &djhdc_dev,
     &mmd_dev,
+    &mmdc_dev,
     &mmdm_dev,
+    &mmdp_dev,
     /* MITS 88-2SIO */
     &m2sio0_dev,
     &m2sio1_dev,
