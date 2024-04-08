@@ -279,6 +279,7 @@
     <ClCompile Include="..\AltairZ80\s100_hayes.c" />
     <ClCompile Include="..\AltairZ80\s100_hdc1001.c" />
     <ClCompile Include="..\AltairZ80\s100_icom.c" />
+    <ClCompile Include="..\AltairZ80\s100_ide.c" />
     <ClCompile Include="..\AltairZ80\s100_if3.c" />
     <ClCompile Include="..\AltairZ80\s100_jadedd.c" />
     <ClCompile Include="..\AltairZ80\s100_jair.c" />

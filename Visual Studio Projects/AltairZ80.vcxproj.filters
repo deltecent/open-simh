@@ -129,6 +129,9 @@
     <ClCompile Include="..\AltairZ80\s100_icom.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\AltairZ80\s100_ide.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\AltairZ80\s100_if3.c">
       <Filter>Source Files</Filter>
     </ClCompile>
