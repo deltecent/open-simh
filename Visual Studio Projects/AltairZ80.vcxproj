@@ -294,6 +294,7 @@
     <ClCompile Include="..\AltairZ80\s100_tdd.c" />
     <ClCompile Include="..\AltairZ80\s100_tuart.c" />
     <ClCompile Include="..\AltairZ80\s100_vdm1.c" />
+    <ClCompile Include="..\AltairZ80\s100_vf.c" />
     <ClCompile Include="..\AltairZ80\sol20.c" />
     <ClCompile Include="..\AltairZ80\vfdhd.c" />
     <ClCompile Include="..\AltairZ80\wd179x.c" />
